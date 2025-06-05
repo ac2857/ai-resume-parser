@@ -1,113 +1,183 @@
+
 from __future__ import annotations
 
+import re
 import shutil
 from datetime import datetime
 from pathlib import Path
+from typing import Iterable
 
 import pandas as pd
 import streamlit as st
+from pypdf import PdfReader
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
 
 ###############################################################################
-# Page config & helpers
+# Config & constants
 ###############################################################################
 
-st.set_page_config(page_title="PDF + Notes Collector", layout="wide")
+st.set_page_config(page_title="AI Resume‑JD Matcher", layout="wide")
 
 UPLOADS_DIR = Path("uploads")
 DATA_CSV = Path("data.csv")
+STOPWORDS: set[str]
+try:
+    # scikit‑learn's built‑in English stopwords
+    from sklearn.feature_extraction.text import ENGLISH_STOP_WORDS as STOPWORDS  # type: ignore
+except ImportError:
+    STOPWORDS = set()
 
+###############################################################################
+# Helpers
+###############################################################################
 
 def ensure_dirs() -> None:
     UPLOADS_DIR.mkdir(exist_ok=True)
     if not DATA_CSV.exists():
-        DATA_CSV.write_text("file_path,notes,timestamp\n")
+        DATA_CSV.write_text("file_path,coverage,similarity,timestamp\n")
 
 
-def save_files(files: list[st.runtime.uploaded_file_manager.UploadedFile], notes: str) -> pd.DataFrame:
-    """Persist *files* to disk and return log rows as a DataFrame."""
+def preprocess(text: str) -> list[str]:
+    """Lower‑case, keep alphabetic tokens ≥3 chars, drop stopwords."""
+    tokens = re.findall(r"[A-Za-z]{3,}", text.lower())
+    return [t for t in tokens if t not in STOPWORDS]
+
+
+def extract_pdf_text(uploaded_file: st.runtime.uploaded_file_manager.UploadedFile | Path) -> str:
+    """Return concatenated text from all pages of a PDF."""
+    if isinstance(uploaded_file, Path):
+        f_obj = open(uploaded_file, "rb")
+        reader = PdfReader(f_obj)
+    else:
+        reader = PdfReader(uploaded_file)
+    text = "\n".join(page.extract_text() or "" for page in reader.pages)
+    return text
+
+
+def evaluate_fit(resume_tokens: list[str], jd_tokens: list[str]) -> tuple[float, float, set[str], set[str]]:
+    """Return (coverage %, cosine similarity, matched, missing)."""
+    jd_unique = set(jd_tokens)
+    resume_unique = set(resume_tokens)
+    matched = jd_unique & resume_unique
+    missing = jd_unique - resume_unique
+    coverage = 100 * len(matched) / max(1, len(jd_unique))
+
+    vect = TfidfVectorizer(stop_words="english")
+    try:
+        tfidf = vect.fit_transform([" ".join(resume_tokens), " ".join(jd_tokens)])
+        similarity = float(cosine_similarity(tfidf[0], tfidf[1])[0, 0])
+    except ValueError:
+        # happens if either doc is empty after preprocessing
+        similarity = 0.0
+
+    return coverage, similarity, matched, missing
+
+
+def save_files_and_log(files: Iterable[st.runtime.uploaded_file_manager.UploadedFile],
+                       jd_text: str,
+                       coverage: float,
+                       similarity: float) -> None:
     ts = datetime.now().isoformat(timespec="seconds")
-    rows = []
+
+    log_rows = []
     for f in files:
         dest = UPLOADS_DIR / f.name
         with open(dest, "wb") as out:
             shutil.copyfileobj(f, out)
-        rows.append({"file_path": str(dest), "notes": notes, "timestamp": ts})
-    return pd.DataFrame(rows)
+        log_rows.append({
+            "file_path": str(dest),
+            "coverage": f"{coverage:.1f}",
+            "similarity": f"{similarity:.3f}",
+            "timestamp": ts,
+        })
 
-
-def load_log() -> pd.DataFrame:
-    return pd.read_csv(DATA_CSV) if DATA_CSV.exists() else pd.DataFrame(columns=["file_path", "notes", "timestamp"])
-
-
-def write_log(df: pd.DataFrame) -> None:
-    df.to_csv(DATA_CSV, index=False)
+    df_existing = pd.read_csv(DATA_CSV) if DATA_CSV.exists() else pd.DataFrame()
+    df_new = pd.DataFrame(log_rows)
+    pd.concat([df_existing, df_new], ignore_index=True).to_csv(DATA_CSV, index=False)
 
 ###############################################################################
-# Main UI
+# UI
 ###############################################################################
 
 ensure_dirs()
-st.title("AI Resume Parser and Analyzer")
 
-###############################################################################
-# Upload + notes form (auto‑clears on submit)
-###############################################################################
+st.title("🧮 AI Resume ↔️ JD Matcher")
 
-with st.form("upload_form", clear_on_submit=True):
-    left, right = st.columns(2)
+with st.form("matcher_form", clear_on_submit=True):
+    col1, col2 = st.columns(2)
 
-    with left:
+    with col1:
         uploaded_files = st.file_uploader(
-            "Upload PDF file(s)",
+            "Upload resume PDF (1 per submission preferred)",
             type=["pdf"],
             accept_multiple_files=True,
-            help="Drag‑and‑drop one or more PDF resumes, papers, etc.",
+            help="Drag‑and‑drop a PDF resume",
         )
 
-    with right:
-        notes = st.text_area(
-            "Notes / description",
-            height=250,
-            placeholder="Enter notes that relate to the uploaded PDF(s)…",
+    with col2:
+        jd_text = st.text_area(
+            "Job description", height=250,
+            placeholder="Paste the target job description here…",
         )
 
-    submitted = st.form_submit_button("💾 Save entry", type="primary")
+    submitted = st.form_submit_button("⚖️ Evaluate fit", type="primary")
+
+# ---------------------------------------------------------------------------
+# Evaluation
+# ---------------------------------------------------------------------------
 
 if submitted:
-    if uploaded_files:
-        new_rows_df = save_files(uploaded_files, notes)
+    if not uploaded_files:
+        st.warning("Please upload at least one PDF resume.")
+        st.stop()
+    if not jd_text.strip():
+        st.warning("Job description cannot be empty.")
+        st.stop()
 
-        if "log_df" not in st.session_state:
-            st.session_state.log_df = load_log()
-        st.session_state.log_df = pd.concat([st.session_state.log_df, new_rows_df], ignore_index=True)
-        write_log(st.session_state.log_df)
+    jd_tokens = preprocess(jd_text)
+    if not jd_tokens:
+        st.error("Job description yielded no usable keywords after cleaning.")
+        st.stop()
 
-        st.success(f"Resume uploaded")
-    else:
-        st.warning("Please upload at least one PDF before saving.")
+    # For now evaluate only first resume if multiple
+    f0 = uploaded_files[0]
+    resume_text = extract_pdf_text(f0)
+    resume_tokens = preprocess(resume_text)
+
+    coverage, sim, matched_kw, missing_kw = evaluate_fit(resume_tokens, jd_tokens)
+
+    # Save
+    save_files_and_log(uploaded_files, jd_text, coverage, sim)
+
+    # Results UI
+    st.success("Evaluation complete!")
+    st.metric("Keyword coverage (%)", f"{coverage:.1f}")
+    #st.metric("Cosine similarity", f"{sim:.3f}")
+
+    with st.expander("🟢 Matched keywords"):
+        st.write(", ".join(sorted(matched_kw)) or "None")
+    with st.expander("🔴 Missing keywords"):
+        st.write(", ".join(sorted(missing_kw)) or "None")
 
 ###############################################################################
-# Display log
+# Log display
 ###############################################################################
 
-# log_df = st.session_state.get("log_df", load_log())
-
-# st.subheader("📑 Existing Entries")
-# if log_df.empty:
-#     st.info("No entries yet. Upload a PDF and add some notes to get started!")
-# else:
-#     st.dataframe(log_df, use_container_width=True)
+if DATA_CSV.exists():
+    st.subheader("📜 Evaluation history")
+    st.dataframe(pd.read_csv(DATA_CSV), use_container_width=True)
 
 ###############################################################################
-# Sidebar help
+# Sidebar
 ###############################################################################
 
-with st.sidebar.expander("ℹ️ How to use this app", expanded=False):
+with st.sidebar.expander("ℹ️ About", expanded=False):
     st.markdown(
         """
-        1. **Upload** your resume using the left‑hand widget.
-        2. **Type** job role description on the right.
-        3. Press **Upload** – 
-        4. Your job role matching is generated
+        **AI Resume‑JD Matcher** quickly gauges how well a resume aligns
+        with a job description by comparing keyword overlap and TF‑IDF
+        similarity. Use it to spot skill gaps or tailor your CV before
+        applying.
         """
     )
