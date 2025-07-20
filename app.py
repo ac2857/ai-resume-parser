@@ -5,7 +5,7 @@ import pdfplumber
 from matcher import match_resumes_to_jd, extract_skills, clean_text
 
 st.set_page_config(page_title="AI Resume Matcher", page_icon="📄", layout="wide")
-st.title("🤖 AI-Powered Resume Matcher (BERT + NLP)")
+st.title("AI-Powered Resume Matcher")
 st.write("Paste a job description and upload PDF resumes to see semantic matches and skill gaps.")
 
 jd_text_input = st.text_area("✍️ Paste Job Description Here", height=300)
@@ -20,7 +20,7 @@ def pdf_to_text(file_obj):
                 text += page_text + "\n"
     return text
 
-if st.button("🔎 Match Now"):
+if st.button("Run analysis"):
     if not jd_text_input.strip():
         st.error("Please paste a job description.")
     elif not uploaded_pdfs:
@@ -28,13 +28,13 @@ if st.button("🔎 Match Now"):
     else:
         jd_text = clean_text(jd_text_input)
 
-        # Prepare directory
+        
         resume_dir = 'uploaded_resumes'
         os.makedirs(resume_dir, exist_ok=True)
         for old in os.listdir(resume_dir):
             os.remove(os.path.join(resume_dir, old))
 
-        # Convert PDFs to .txt
+        
         for pdf in uploaded_pdfs:
             resume_text = pdf_to_text(pdf)
             with open(os.path.join(resume_dir, pdf.name + ".txt"), 'w', encoding='utf-8') as f:
