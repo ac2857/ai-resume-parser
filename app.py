@@ -40,12 +40,12 @@ if st.button("🔎 Match Now"):
             with open(os.path.join(resume_dir, pdf.name + ".txt"), 'w', encoding='utf-8') as f:
                 f.write(resume_text)
 
-        st.subheader("✅ Matching Results")
+        st.subheader("Matching Results")
         df = match_resumes_to_jd(resume_dir, jd_text)
         st.dataframe(df)
 
         # Skill gap analysis
-        st.subheader("💡 Skill Gap Analysis")
+        st.subheader("Skill Gap Analysis")
         jd_skills = set(extract_skills(jd_text))
         for resume_name in df['Resume']:
             with open(os.path.join(resume_dir, resume_name), 'r', encoding='utf-8') as f:
